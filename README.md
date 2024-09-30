@@ -5,7 +5,8 @@ Implement an "LP and Chill" Vault for Hyperdrive Protocol
 ## Background
 
 Hyperdrive is a fixed-rates protocol that allows traders to long and short bonds with terms on demand. To increase distribution and accessibility for liquidity providers (LPs), we want to implement an ERC4626 vault that wraps the LP position. This vault, which we're calling the "LP and Chill" vault, will allow users to easily deposit into a managed position that LPs into the Hyperdrive protocol.
-Objective
+
+## Objective
 
 Your task is to implement the "LP and Chill" vault as an ERC4626-compliant contract that interacts with the Hyperdrive protocol. This vault should allow users to deposit base assets, which the vault then uses to provide liquidity to Hyperdrive. The vault should also handle the complexities of managing the LP position, including adding liquidity, removing liquidity, and handling any rewards or fees.
 
