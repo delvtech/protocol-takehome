@@ -11,9 +11,7 @@ Your task is to implement the "LP and Chill" vault as an ERC4626-compliant contr
 
 ## Requirements
 
-Implement an ERC4626-compliant vault contract that interacts with the Hyperdrive protocol.
-The vault should accept deposits in the base asset used by Hyperdrive.
-Implement the core ERC4626 functions, ensuring they interact correctly with Hyperdrive:
+Complete the "LP And Chill" vault that was started in `contracts/LPAndChill.sol`. This vault should invest all of its assets into the Hyperdrive LP position. The vault should accept deposits in the base asset used by Hyperdrive. Implement the core ERC4626 functions, ensuring they interact correctly with Hyperdrive:
 
 - `deposit`
 - `mint`
