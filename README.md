@@ -52,6 +52,6 @@ Open a PR to the takehome repository with your submission. Write up a PR descrip
 
 Submit your code as a Git repository. Include all necessary contracts, tests, and documentation. Provide clear instructions on how to set up and run your project. You have 5 days to complete this assignment from the time you receive it.
 
-While this assignment is designed to be completed in approximately 10-16 hours, please don't feel pressured to spend more than 20 hours on it. We value your time and are more interested in your approach and understanding rather than a perfect implementation.
+This project is a significant undertaking, and we don't expect you to complete it. Do what you can in the provided 10 hours and think about things like what you still need to do, what you would change, etc. We're more interested in seeing how you tackle a challenging problem than in a perfect finished product.
 
 Good luck! We look forward to seeing your implementation of the "LP and Chill" vault.
