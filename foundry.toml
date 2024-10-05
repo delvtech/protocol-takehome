@@ -18,6 +18,7 @@ remappings = [
   'hyperdrive/=lib/hyperdrive/contracts/',
   'openzeppelin/=lib/openzeppelin-contracts/contracts/',
   'solady/=lib/solady/src/',
+  '@openzeppelin/contracts-upgradeable=lib/openzeppelin-contracts-upgradeable/contracts'
 ]
 # gas limit - max u64
 gas_limit = "18446744073709551615"

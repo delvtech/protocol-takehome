@@ -5,6 +5,12 @@ import {IERC20} from "hyperdrive/src/interfaces/IERC20.sol";
 import {IHyperdrive} from "hyperdrive/src/interfaces/IHyperdrive.sol";
 import {HyperdriveMath} from "hyperdrive/src/libraries/HyperdriveMath.sol";
 import {ERC4626} from "solady/tokens/ERC4626.sol";
+import './upgrades/BeaconImplementation.sol';
+import {IServiceConfiguration} from './interfaces/IServiceConfiguration.sol';
+import {IVault} from './interfaces/IVault.sol';
+import {IVaultFactory} from './factories/interfaces/IVaultFactory.sol';
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
 
 /// @author DELV
 /// @title Momo
@@ -13,21 +19,32 @@ import {ERC4626} from "solady/tokens/ERC4626.sol";
 /// @custom:disclaimer The language used in this code is for coding convenience
 ///                    only, and is not intended to, and does not, have any
 ///                    particular legal or regulatory significance.
-contract LPAndChill is ERC4626 {
+contract LPAndChill is ERC4626, BeaconImplementation {
+    using SafeERC20 for IERC20;
+    using HyperdriveMath for uint256;
     // ╭─────────────────────────────────────────────────────────╮
     // │ Storage                                                 │
     // ╰─────────────────────────────────────────────────────────╯
 
     // ───────────────────────── Immutables ──────────────────────
 
-    /// @dev A flag indicating whether or not deposits and withdrawals should
-    ///      be processed in base or vault shares.
-    bool public immutable asBase;
+    // ───────────────────────── Constants ──────────────────────
+    uint16 public constant MAX_BPS = 10_000;
+    uint16 public constant MAX_SERVICE_FEE_BPS = 3_000; // 30%
+    uint256 constant ONE = 1e18; // Fixed point number in 1e18 format. 
 
-    /// @dev The asset underlying all of the investments.
-    IERC20 internal immutable _asset;
 
     // ─────────────────────────── State ────────────────────────
+
+    /// @dev A flag indicating whether or not deposits and withdrawals should
+    ///      be processed in base or vault shares.
+    bool public asBase;
+
+    /// @dev The asset underlying all of the investments.
+    IERC20 internal _asset;
+
+    /// @dev The service fee in basis points.
+    uint16 public serviceFeeBps;
 
     /// @dev The name of the LPAndChill token.
     string internal _name;
@@ -36,24 +53,40 @@ contract LPAndChill is ERC4626 {
     string internal _symbol;
 
     /// @notice The Hyperdrive pool.
-    IHyperdrive public immutable hyperdrive;
+    IHyperdrive public hyperdrive;
+
+    
+    /// @dev Reference to the global service configuration.
+    IServiceConfiguration private _serviceConfiguration;
+
+    /// @dev A vault holding service fees collected from users.
+    IVault private _feeVault;
+
 
     // ╭─────────────────────────────────────────────────────────╮
-    // │ Constructor                                             │
+    // │ Initializer                                             │
     // ╰─────────────────────────────────────────────────────────╯
 
-    /// @notice Instantiates the Momo vault.
-    /// @param __name Name of the Momo vault token.
-    /// @param __symbol Symbol of the Momo vault token.
+    /// @notice Initializes the LPAndChill vault.
+    /// @param __serviceConfiguration The service configuration.
+    /// @param _vaultFactory The vault factory.
+    /// @param _serviceFeeBps The service fee in basis points.
+    /// @param __name Name of the LPAndChill vault token.
+    /// @param __symbol Symbol of the LPAndChill vault token.
     /// @param _hyperdrive The Hyperdrive pool to invest into.
     /// @param _asBase A flag indicating whether to deposit and withdraw using
     ///        base or vault shares.
-    constructor(
+    function initialize(
+        address __serviceConfiguration,
+        address _vaultFactory,
+        uint16 _serviceFeeBps,
         string memory __name,
         string memory __symbol,
         IHyperdrive _hyperdrive,
         bool _asBase
-    ) {
+    ) public initializer {
+        require(_serviceFeeBps <= MAX_SERVICE_FEE_BPS, 'LPAndChill: service fee too high');
+
         // Set the name and symbol.
         _name = __name;
         _symbol = __symbol;
@@ -68,7 +101,17 @@ contract LPAndChill is ERC4626 {
             _asset = IERC20(_hyperdrive.vaultSharesToken());
         }
         asBase = _asBase;
+
+        _serviceConfiguration = IServiceConfiguration(__serviceConfiguration);
+
+        // Precaucious security measure: Only asset registered in ServiceConfiguration can be used!
+        require(_serviceConfiguration.isLiquidityAsset(address(_asset)), 'LPAndChillVault: invalid asset');
+
+        // Create the fee vault
+        _feeVault = IVault(IVaultFactory(_vaultFactory).createVault());
+        serviceFeeBps = _serviceFeeBps;
     }
+
 
     // ╭─────────────────────────────────────────────────────────╮
     // │ Stateful                                                │
@@ -84,6 +127,51 @@ contract LPAndChill is ERC4626 {
     //        `hyperdrive.getPoolInfo().lpSharePrice` to get the share price. Be
     //        aware that this share price can slip when there are existing long
     //        and short positions open on Hyperdrive.
+
+    function deposit(uint256 assets, address receiver) public override returns (uint256 shares) {
+        require(assets > 0, 'LPAndChill: deposit amount is zero');
+        require(assets <= _asset.balanceOf(msg.sender), 'LPAndChill: deposit amount exceeds balance');
+        require(assets <= _asset.allowance(msg.sender, address(this)), 'LPAndChill: deposit amount exceeds allowance');
+        require(receiver != address(0), 'LPAndChill: receiver is zero address');
+
+        // Calculate the fee
+        uint256 fee = (assets * serviceFeeBps) / MAX_BPS;
+        uint256 assetsAfterFee = assets - fee;
+
+        // Transfer the fee to the fee vault
+        if (fee > 0) {
+            _asset.safeTransferFrom(msg.sender, address(_feeVault), fee);
+        }
+
+        // Deposit the remaining assets and mint shares
+        shares = super.deposit(assetsAfterFee, receiver);
+
+        // Invest the assets after fee into Hyperdrive
+        _investInHyperdrive(assetsAfterFee);
+    }
+
+    function mint(uint256 shares, address receiver) public override returns (uint256 assets) {
+        require(shares > 0, 'LPAndChill: mint amount is zero');
+        require(receiver != address(0), 'LPAndChill: receiver is zero address');
+
+        uint256 previewAssets = super.previewMint(shares);
+        require(previewAssets <= _asset.balanceOf(msg.sender), 'LPAndChill: mint amount exceeds balance');
+        require(previewAssets <= _asset.allowance(msg.sender, address(this)), 'LPAndChill: mint amount exceeds allowance');
+
+        // Calculate the fee
+        uint256 feeShares = (shares * serviceFeeBps) / MAX_BPS;
+        uint256 assetsForFee = super.previewMint(feeShares);
+        uint256 sharesAfterFee = shares - feeShares;
+
+        // Transfer the fee to the fee vault
+        if (assetsForFee > 0) {
+            _asset.safeTransferFrom(msg.sender, address(_feeVault), assetsForFee);
+        }
+
+        assets = super.mint(sharesAfterFee, receiver);
+        _investInHyperdrive(assets);
+    }
+
 
     // ╭─────────────────────────────────────────────────────────╮
     // │ Getters                                                 │
@@ -122,7 +210,17 @@ contract LPAndChill is ERC4626 {
     /// @return The total value of LPAndChill's portfolio.
     function totalAssets() public view override returns (uint256) {
         // FIXME: This needs to be updated.
-        return _asset.balanceOf(address(this));
+        // Sean: when asBase, the totalAssets is in terms of base tokens;
+        //      when !asBase, the totalAssets is in terms of vault shares;
+        //      Note that the price variables here are all scaled up by 1e18;
+        IHyperdrive.PoolInfo memory poolInfo = hyperdrive.getPoolInfo();
+        uint256 lpBalance = hyperdrive.balanceOf(address(this));
+    
+        if (asBase) {
+            return lpBalance.mulDivDown(poolInfo.lpSharePrice, ONE);
+        } else {
+            return lpBalance.mulDivDown(poolInfo.lpSharePrice, poolInfo.vaultSharePrice);
+        }
     }
 
     /// @dev The number of decimals of the underlying asset.
@@ -137,4 +235,40 @@ contract LPAndChill is ERC4626 {
         uint8 decimals_ = decimals();
         return decimals_ > 6 ? decimals_ - 3 : decimals_;
     }
+
+    // ───────────────────────── Privileged  ──────────────────────
+
+    /// @notice Sets the service fee in basis points.
+    /// @param _serviceFeeBps The service fee in basis points.
+    function setServiceFeeBps(uint16 _serviceFeeBps) external {
+        require(_serviceConfiguration.isOperator(msg.sender), 'LPAndChill: invalid role for the caller');
+        require(_serviceFeeBps <= MAX_SERVICE_FEE_BPS, 'LPAndChill: service fee too high');
+        serviceFeeBps = _serviceFeeBps;
+    }
+
+    // ───────────────────────── Hyperdrive ───────────────────────
+    function _investInHyperdrive(uint256 assets) internal {
+
+        // Sean: implement some guards wrt the min/maxApr and LP share price slippage.
+        //      Using some simple rule based logic, not ideal but it's a start.
+        //      It can be future TODOs.
+
+        uint256 minLpSharePrice = hyperdrive.getPoolInfo().lpSharePrice.mulDivDown(9500, MAX_BPS); // 5% slippage
+
+        // Sean: The min/max APR should be user specified range which deem acceptable to them. Too low apr
+        //      means the yield is not attractive enough, too high APR means the utilization in the yield 
+        //      source vault is too high so it's riskier. The user should have this min/max in mind and it's
+        //      a personal choice, and is not necessarily based on the last checkpoint's Hyperdrive pool 
+        //      spot APR with some buffer. Hence, I'm gonna use rule based logic here as well.
+
+        uint256 minApr = 0.01e18; // 1%
+        uint256 maxApr = 0.50e18; // 50%
+
+        bytes memory extraData = new bytes(0);
+
+        _asset.approve(address(hyperdrive), assets);
+        hyperdrive.addLiquidity(assets, minLpSharePrice, minApr, maxApr, IHyperdrive.Options(address(this), asBase, extraData));
+    }
+
+    
 }
