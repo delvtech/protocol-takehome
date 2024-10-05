@@ -10,7 +10,7 @@ import {IServiceConfiguration} from './interfaces/IServiceConfiguration.sol';
 import {IVault} from './interfaces/IVault.sol';
 import {IVaultFactory} from './factories/interfaces/IVaultFactory.sol';
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-
+import { FixedPointMath, ONE } from "hyperdrive/src/libraries/FixedPointMath.sol";
 
 /// @author DELV
 /// @title Momo
@@ -31,7 +31,6 @@ contract LPAndChill is ERC4626, BeaconImplementation {
     // ───────────────────────── Constants ──────────────────────
     uint16 public constant MAX_BPS = 10_000;
     uint16 public constant MAX_SERVICE_FEE_BPS = 3_000; // 30%
-    uint256 constant ONE = 1e18; // Fixed point number in 1e18 format. 
 
 
     // ─────────────────────────── State ────────────────────────
@@ -61,6 +60,14 @@ contract LPAndChill is ERC4626, BeaconImplementation {
 
     /// @dev A vault holding service fees collected from users.
     IVault private _feeVault;
+
+    /// @notice The different types of tokens in the system.
+    enum TokenType {
+        LP,
+        LONG,
+        SHORT,
+        WITHDRAWAL_SHARE
+    }
 
 
     // ╭─────────────────────────────────────────────────────────╮
@@ -140,11 +147,12 @@ contract LPAndChill is ERC4626, BeaconImplementation {
 
         // Transfer the fee to the fee vault
         if (fee > 0) {
-            _asset.safeTransferFrom(msg.sender, address(_feeVault), fee);
+            require(_asset.transferFrom(msg.sender, address(_feeVault), fee), 'LPAndChill: transfer fee failed');
         }
 
         // Deposit the remaining assets and mint shares
         shares = super.deposit(assetsAfterFee, receiver);
+        require(shares > 0, 'LPAndChill: shares amount rounded to zero');
 
         // Invest the assets after fee into Hyperdrive
         _investInHyperdrive(assetsAfterFee);
@@ -165,11 +173,57 @@ contract LPAndChill is ERC4626, BeaconImplementation {
 
         // Transfer the fee to the fee vault
         if (assetsForFee > 0) {
-            _asset.safeTransferFrom(msg.sender, address(_feeVault), assetsForFee);
+            require(_asset.transferFrom(msg.sender, address(_feeVault), assetsForFee), 'LPAndChill: transfer fee failed');
         }
 
         assets = super.mint(sharesAfterFee, receiver);
+        require(assets > 0, 'LPAndChill: assets amount rounded to zero');
+
         _investInHyperdrive(assets);
+    }
+
+    function withdraw(uint256 assets, address receiver, address owner) public override returns (uint256 shares) {
+        require(assets > 0, 'LPAndChill: withdraw amount is zero');
+        require(receiver != address(0), 'LPAndChill: receiver is zero address');
+        require(owner == msg.sender, 'LPAndChill: invalid owner'); // Sean: Not allowing the owner to be someone else
+
+        // Calculate shares to burn without actually burning them yet
+        shares = super.previewWithdraw(assets);
+        require(shares > 0, 'LPAndChill: shares amount rounded to zero');
+        require(shares <= balanceOf(owner), 'LPAndChill: withdraw amount exceeds balance');
+        require(shares <= allowance(owner, address(this)), 'LPAndChill: withdraw amount exceeds allowance');
+
+        // Remove liquidity from Hyperdrive first
+        uint256 proceeds = _removeFromHyperdrive(assets);
+
+        // Now perform the actual withdrawal using the proceeds
+        shares = super.withdraw(proceeds, receiver, owner);
+
+        emit Withdraw(msg.sender, receiver, owner, proceeds, shares);
+        return shares;
+    }
+
+    function redeem(uint256 shares, address receiver, address owner) public override returns (uint256 assets) {
+        require(shares > 0, 'LPAndChill: redeem amount is zero');
+        require(receiver != address(0), 'LPAndChill: receiver is zero address');
+        require(owner == msg.sender, 'LPAndChill: invalid owner');
+
+        // Calculate assets without actually burning shares yet
+        assets = super.previewRedeem(shares);
+        require(assets > 0, 'LPAndChill: assets amount rounded to zero');
+        require(shares <= balanceOf(owner), 'LPAndChill: redeem amount exceeds balance');
+        require(shares <= allowance(owner, address(this)), 'LPAndChill: redeem amount exceeds allowance');
+
+        // Remove liquidity from Hyperdrive first
+        uint256 proceeds = _removeFromHyperdrive(assets);
+
+        // Now perform the actual redemption using the proceeds
+        // Sean: Still using super.withdraw() with the proceeds amount is OK, instead of
+        //      super.redeem() with the shares amount.  
+        shares = super.withdraw(proceeds, receiver, owner);
+
+        emit Withdraw(msg.sender, receiver, owner, proceeds, shares);
+        return assets;
     }
 
 
@@ -214,12 +268,12 @@ contract LPAndChill is ERC4626, BeaconImplementation {
         //      when !asBase, the totalAssets is in terms of vault shares;
         //      Note that the price variables here are all scaled up by 1e18;
         IHyperdrive.PoolInfo memory poolInfo = hyperdrive.getPoolInfo();
-        uint256 lpBalance = hyperdrive.balanceOf(address(this));
+        uint256 lpBalance = hyperdrive.balanceOf(uint256(TokenType.LP), address(this));
     
         if (asBase) {
-            return lpBalance.mulDivDown(poolInfo.lpSharePrice, ONE);
+            return FixedPointMath.mulDivDown(lpBalance, poolInfo.lpSharePrice, ONE);
         } else {
-            return lpBalance.mulDivDown(poolInfo.lpSharePrice, poolInfo.vaultSharePrice);
+            return FixedPointMath.mulDivDown(lpBalance,poolInfo.lpSharePrice, poolInfo.vaultSharePrice);
         }
     }
 
@@ -253,7 +307,7 @@ contract LPAndChill is ERC4626, BeaconImplementation {
         //      Using some simple rule based logic, not ideal but it's a start.
         //      It can be future TODOs.
 
-        uint256 minLpSharePrice = hyperdrive.getPoolInfo().lpSharePrice.mulDivDown(9500, MAX_BPS); // 5% slippage
+        uint256 minLpSharePrice = FixedPointMath.mulDivDown(hyperdrive.getPoolInfo().lpSharePrice, 9500, MAX_BPS); // 5% slippage
 
         // Sean: The min/max APR should be user specified range which deem acceptable to them. Too low apr
         //      means the yield is not attractive enough, too high APR means the utilization in the yield 
@@ -270,5 +324,28 @@ contract LPAndChill is ERC4626, BeaconImplementation {
         hyperdrive.addLiquidity(assets, minLpSharePrice, minApr, maxApr, IHyperdrive.Options(address(this), asBase, extraData));
     }
 
-    
+    function _removeFromHyperdrive(uint256 assets) internal returns (uint256 proceeds) {
+        IHyperdrive.PoolInfo memory poolInfo = hyperdrive.getPoolInfo();
+        uint256 lpShares = asBase
+            ? FixedPointMath.mulDivUp(assets,ONE, poolInfo.lpSharePrice)
+        : FixedPointMath.mulDivUp(assets, poolInfo.vaultSharePrice, poolInfo.lpSharePrice);
+
+        uint256 minOutputPerShare = asBase ? 
+            // minOutputPerShare = 9500/10000 * lpSharePrice
+            FixedPointMath.mulDivDown(poolInfo.lpSharePrice, 9500, (MAX_BPS*ONE)) : 
+            // minOutputPerShare = 9500/10000 * lpSharePrice / vaultSharePrice
+            FixedPointMath.mulDivDown(poolInfo.lpSharePrice, 9500, (MAX_BPS*poolInfo.vaultSharePrice)); //5% slippage
+
+        bytes memory extraData = new bytes(0);
+        uint256 withdrawalShares;
+        (proceeds, withdrawalShares) = hyperdrive.removeLiquidity(
+            lpShares,
+            minOutputPerShare,
+            IHyperdrive.Options(address(this), asBase, extraData)
+        );
+
+        require(withdrawalShares == 0, "LPAndChill: Not enough liquidity at the moment");
+
+        return (proceeds);
+    }
 }
