@@ -264,6 +264,17 @@ contract LPAndChill is ERC4626, BeaconImplementation {
     /// @return The total value of LPAndChill's portfolio.
     function totalAssets() public view override returns (uint256) {
         // FIXME: This needs to be updated.
+
+        // Sean: In most of the time, the LPAndChill vault is only holding 1 type of token,
+        //      which is the lpShare token. However, there is an edge case like during the
+        //      mid of a withdrawal, when the asset token has been moved from Hyperdrive pool
+        //      to here but not yet transfered to the user, at this moment the totalAssets()
+        //      should account for both types of tokens.
+
+        // Part 1: the balance of the _asset, sometimes it's not zero
+        uint256 assetBalance = _asset.balanceOf(address(this));
+
+        // Part 2: calculate the value of the lpShare tokens
         // Sean: when asBase, the totalAssets is in terms of base tokens;
         //      when !asBase, the totalAssets is in terms of vault shares;
         //      Note that the price variables here are all scaled up by 1e18;
@@ -271,9 +282,9 @@ contract LPAndChill is ERC4626, BeaconImplementation {
         uint256 lpBalance = hyperdrive.balanceOf(uint256(TokenType.LP), address(this));
     
         if (asBase) {
-            return FixedPointMath.mulDivDown(lpBalance, poolInfo.lpSharePrice, ONE);
+            return FixedPointMath.mulDivDown(lpBalance, poolInfo.lpSharePrice, ONE) + assetBalance;
         } else {
-            return FixedPointMath.mulDivDown(lpBalance,poolInfo.lpSharePrice, poolInfo.vaultSharePrice);
+            return FixedPointMath.mulDivDown(lpBalance,poolInfo.lpSharePrice, poolInfo.vaultSharePrice) + assetBalance;
         }
     }
 
