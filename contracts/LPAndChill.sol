@@ -59,7 +59,7 @@ contract LPAndChill is ERC4626, BeaconImplementation {
     IServiceConfiguration private _serviceConfiguration;
 
     /// @dev A vault holding service fees collected from users.
-    IVault private _feeVault;
+    IVault public feeVault;
 
     /// @notice The different types of tokens in the system.
     enum TokenType {
@@ -115,7 +115,7 @@ contract LPAndChill is ERC4626, BeaconImplementation {
         require(_serviceConfiguration.isLiquidityAsset(address(_asset)), 'LPAndChillVault: invalid asset');
 
         // Create the fee vault
-        _feeVault = IVault(IVaultFactory(_vaultFactory).createVault());
+        feeVault = IVault(IVaultFactory(_vaultFactory).createVault());
         serviceFeeBps = _serviceFeeBps;
     }
 
@@ -147,7 +147,7 @@ contract LPAndChill is ERC4626, BeaconImplementation {
 
         // Transfer the fee to the fee vault
         if (fee > 0) {
-            require(_asset.transferFrom(msg.sender, address(_feeVault), fee), 'LPAndChill: transfer fee failed');
+            require(_asset.transferFrom(msg.sender, address(feeVault), fee), 'LPAndChill: transfer fee failed');
         }
 
         // Deposit the remaining assets and mint shares
@@ -173,7 +173,7 @@ contract LPAndChill is ERC4626, BeaconImplementation {
 
         // Transfer the fee to the fee vault
         if (assetsForFee > 0) {
-            require(_asset.transferFrom(msg.sender, address(_feeVault), assetsForFee), 'LPAndChill: transfer fee failed');
+            require(_asset.transferFrom(msg.sender, address(feeVault), assetsForFee), 'LPAndChill: transfer fee failed');
         }
 
         assets = super.mint(sharesAfterFee, receiver);
@@ -296,6 +296,13 @@ contract LPAndChill is ERC4626, BeaconImplementation {
 
     /// @dev The number of decimals of the virtual shares. This helps to avoid
     ///      inflation attacks.
+
+    // Sean: Notes: This offset here is sufficient enough to mitigate inflation attack
+    //      because it will mint a lot more shares; however, the users may need to be 
+    //      reminded of this when they plan to call the mint() instead of deposit(). 
+    //      They will need to input a much larger number for the shares to mint, otherwise
+    //      they are very easy to fail to reach the _minimumTransactionAmount threshold
+    //      of the Hyperdrive pool.
     function _decimalsOffset() internal view override returns (uint8) {
         uint8 decimals_ = decimals();
         return decimals_ > 6 ? decimals_ - 3 : decimals_;
