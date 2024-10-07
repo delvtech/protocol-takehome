@@ -7,7 +7,7 @@
     - [x] Implement proper error handling and input validation ---  COMPLETED
     - [x] Include events for important actions --- COMPLETED
     - [x] Implement some tests for the code that you wrote --- COMPLETED
-### Optional
+### Optional -- all done
     - [x] Implement a fee mechanism for the vault, charging a small percentage of yields --- COMPLETED
 ### Bonus
     - [x] LPAndChill vault will be created by a factory contract, because I see there are quite a number of underlying assets supported by Hyperdrive and there may be more in the future. So scalability is needed. --- COMPLETED
