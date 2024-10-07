@@ -39,7 +39,7 @@ contract Vault is IVault, BeaconImplementation {
    */
   function withdrawERC20(address asset, uint256 amount, address receiver) external override onlyNotPaused {
     require(_serviceConfiguration.isOperator(msg.sender), 'feeVault: invalid role for the caller');
-    require(receiver != address(0), 'Vault: 0 address');
+    require(receiver != address(0), 'feeVault: 0 address');
     ERC20Upgradeable(asset).safeTransfer(receiver, amount);
     emit WithdrewERC20(asset, amount, receiver);
   }
