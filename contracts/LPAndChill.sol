@@ -54,6 +54,14 @@ contract LPAndChill is ERC4626, BeaconImplementation {
     /// @notice The Hyperdrive pool.
     IHyperdrive public hyperdrive;
 
+    /// @dev internal accounting to track the principals,
+    ///     in order to calculate equivelent principal amount for fee calculation.
+    struct UserInfo {
+        uint256 totalDeposited; // Total amount deposited by the user
+        uint256 totalShares;     // Total shares held by the user
+    }
+    mapping(address => UserInfo) private userInfo; // Mapping to track user deposits
+
     
     /// @dev Reference to the global service configuration.
     IServiceConfiguration private _serviceConfiguration;
@@ -69,6 +77,13 @@ contract LPAndChill is ERC4626, BeaconImplementation {
         WITHDRAWAL_SHARE
     }
 
+    /**
+        * @dev Modifier to check that the protocol is not paused
+    */
+    modifier onlyNotPaused() {
+        require(!_serviceConfiguration.paused(), 'LPAndChill: Protocol paused');
+        _;
+    }
 
     // ╭─────────────────────────────────────────────────────────╮
     // │ Initializer                                             │
@@ -135,30 +150,26 @@ contract LPAndChill is ERC4626, BeaconImplementation {
     //        aware that this share price can slip when there are existing long
     //        and short positions open on Hyperdrive.
 
-    function deposit(uint256 assets, address receiver) public override returns (uint256 shares) {
+    function deposit(uint256 assets, address receiver) public override onlyNotPaused returns (uint256 shares) {
         require(assets > 0, 'LPAndChill: deposit amount is zero');
         require(assets <= _asset.balanceOf(msg.sender), 'LPAndChill: deposit amount exceeds balance');
         require(assets <= _asset.allowance(msg.sender, address(this)), 'LPAndChill: deposit amount exceeds allowance');
         require(receiver != address(0), 'LPAndChill: receiver is zero address');
 
-        // Calculate the fee
-        uint256 fee = (assets * serviceFeeBps) / MAX_BPS;
-        uint256 assetsAfterFee = assets - fee;
-
-        // Transfer the fee to the fee vault
-        if (fee > 0) {
-            require(_asset.transferFrom(msg.sender, address(feeVault), fee), 'LPAndChill: transfer fee failed');
-        }
-
-        // Deposit the remaining assets and mint shares
-        shares = super.deposit(assetsAfterFee, receiver);
+        // Deposit the assets and mint shares
+        shares = super.deposit(assets, receiver);
         require(shares > 0, 'LPAndChill: shares amount rounded to zero');
 
+        // Update user info
+        userInfo[receiver].totalDeposited += assets; // Update total deposited
+        userInfo[receiver].totalShares += shares;     // Update total shares
+
         // Invest the assets after fee into Hyperdrive
-        _investInHyperdrive(assetsAfterFee);
+        _investInHyperdrive(assets);
+        emit Deposit(msg.sender, msg.sender, assets, shares);
     }
 
-    function mint(uint256 shares, address receiver) public override returns (uint256 assets) {
+    function mint(uint256 shares, address receiver) public override onlyNotPaused returns (uint256 assets) {
         require(shares > 0, 'LPAndChill: mint amount is zero');
         require(receiver != address(0), 'LPAndChill: receiver is zero address');
 
@@ -166,23 +177,18 @@ contract LPAndChill is ERC4626, BeaconImplementation {
         require(previewAssets <= _asset.balanceOf(msg.sender), 'LPAndChill: mint amount exceeds balance');
         require(previewAssets <= _asset.allowance(msg.sender, address(this)), 'LPAndChill: mint amount exceeds allowance');
 
-        // Calculate the fee
-        uint256 feeShares = (shares * serviceFeeBps) / MAX_BPS;
-        uint256 assetsForFee = super.previewMint(feeShares);
-        uint256 sharesAfterFee = shares - feeShares;
-
-        // Transfer the fee to the fee vault
-        if (assetsForFee > 0) {
-            require(_asset.transferFrom(msg.sender, address(feeVault), assetsForFee), 'LPAndChill: transfer fee failed');
-        }
-
-        assets = super.mint(sharesAfterFee, receiver);
+        assets = super.mint(shares, receiver);
         require(assets > 0, 'LPAndChill: assets amount rounded to zero');
 
+        // Update user info
+        userInfo[receiver].totalDeposited += assets; // Update total deposited
+        userInfo[receiver].totalShares += shares;     // Update total shares
+
         _investInHyperdrive(assets);
+        emit Deposit(msg.sender, msg.sender, assets, shares);
     }
 
-    function withdraw(uint256 assets, address receiver, address owner) public override returns (uint256 shares) {
+    function withdraw(uint256 assets, address receiver, address owner) public override onlyNotPaused returns (uint256 shares) {
         require(assets > 0, 'LPAndChill: withdraw amount is zero');
         require(receiver != address(0), 'LPAndChill: receiver is zero address');
         require(owner == msg.sender, 'LPAndChill: invalid owner'); // Sean: Not allowing the owner to be someone else
@@ -198,12 +204,12 @@ contract LPAndChill is ERC4626, BeaconImplementation {
 
         // Now perform the actual withdrawal using the proceeds
         shares = super.withdraw(proceeds, receiver, owner);
-
         emit Withdraw(msg.sender, receiver, owner, proceeds, shares);
-        return shares;
+
+        _handleYieldAndFees(owner, shares, proceeds, receiver);
     }
 
-    function redeem(uint256 shares, address receiver, address owner) public override returns (uint256 assets) {
+    function redeem(uint256 shares, address receiver, address owner) public override onlyNotPaused returns (uint256 assets) {
         require(shares > 0, 'LPAndChill: redeem amount is zero');
         require(receiver != address(0), 'LPAndChill: receiver is zero address');
         require(owner == msg.sender, 'LPAndChill: invalid owner');
@@ -221,9 +227,9 @@ contract LPAndChill is ERC4626, BeaconImplementation {
         // Sean: Still using super.withdraw() with the proceeds amount is OK, instead of
         //      super.redeem() with the shares amount.  
         shares = super.withdraw(proceeds, receiver, owner);
-
         emit Withdraw(msg.sender, receiver, owner, proceeds, shares);
-        return assets;
+
+        _handleYieldAndFees(owner, shares, proceeds, receiver);
     }
 
 
@@ -365,5 +371,29 @@ contract LPAndChill is ERC4626, BeaconImplementation {
         require(withdrawalShares == 0, "LPAndChill: Not enough liquidity at the moment");
 
         return (proceeds);
+    }
+
+    function _handleYieldAndFees(address owner, uint256 shares, uint256 proceeds, address receiver) internal {
+        // Calculate the yield for the user
+        uint256 userTotalPrincipal = userInfo[owner].totalDeposited;
+        uint256 userEquivelentPrincipal = (shares * userTotalPrincipal) / userInfo[owner].totalShares; 
+        uint256 yield = proceeds > userEquivelentPrincipal ? proceeds - userEquivelentPrincipal : 0;
+
+        // Update user info
+        userInfo[owner].totalDeposited = 
+            userInfo[owner].totalDeposited * 
+            (userInfo[owner].totalShares - shares) / 
+            userInfo[owner].totalShares; // Update total deposited
+
+        userInfo[owner].totalShares -= shares;     // Update total shares
+
+        if (yield > 0) {
+            uint256 fee = (yield * serviceFeeBps) / MAX_BPS;
+            if (fee > 0) {
+                // Transfer the fee to the fee vault
+                require(fee <= _asset.allowance(receiver, address(this)), 'LPAndChill: allowance lower than fee amount');
+                require(_asset.transferFrom(receiver, address(feeVault), fee), 'LPAndChill: transfer fee failed');
+            }
+        }
     }
 }

@@ -141,17 +141,11 @@ contract LPAndChillTest is Test {
 
         // Check that assets were minted
         assert(assets > 0);
-
-        // Sean: Do not forget the fee percentage in the assertion below!
-        assert(chill.balanceOf(address(this)) == 
-            mintAmount * (uint256(chill.MAX_BPS()) - uint256(chill.serviceFeeBps())) / uint256(chill.MAX_BPS()));
+        assert(chill.balanceOf(address(this)) == mintAmount);
         
         // Check that the asset balance has decreased by the required amount
         uint256 newBalance = asset.balanceOf(address(this));
-
-        // Sean: the difference in the before and after balances is not assets but is requiredAssets
-        //      It's because of the fee.
-        assert(newBalance == initialBalance - requiredAssets);
+        assert(newBalance == initialBalance - assets);
     }
 
     function testWithdraw() public {
@@ -162,28 +156,32 @@ contract LPAndChillTest is Test {
         asset.approve(address(chill), depositAmount);
 
         // Deposit into the LPAndChill contract
-        chill.deposit(depositAmount, address(this));
+        uint256 initialShares = chill.deposit(depositAmount, address(this));
+
+        // Give it some time and let the yield grow
+        skip(60*60*24*100);
 
         // Withdraw just half of the amount, so the fee mechasim won't bother this test
         uint256 withdrawAmount = 500 * 10 ** (asset.decimals()); 
 
-
-        uint256 initialBalance = asset.balanceOf(address(this));
+        uint256 balanceBefore = asset.balanceOf(address(this));
         // Withdraw from the LPAndChill contract
         chill.approve(address(chill), type(uint256).max);
+        asset.approve(address(chill), type(uint256).max);
         uint256 shares = chill.withdraw(withdrawAmount, address(this), address(this));
+
 
         // Check that shares were burned
         assert(shares > 0);
-        assert(chill.balanceOf(address(this)) < shares);
+        assert(chill.balanceOf(address(this)) == initialShares - shares);
 
-        // Check that the asset balance has increased by the withdraw amount
-        uint256 newBalance = asset.balanceOf(address(this));
+        // Check that the asset balance has increased
+        uint256 balanceAfter = asset.balanceOf(address(this));
 
         // Sean: Weak check in the assertion without quantifying the delta, because
         //      the amount received may be different than the amount specified to 
         //      withdraw, due to the pricing mechanism of Hyperdrive LP.
-        assert(newBalance > initialBalance); 
+        assert(balanceAfter > balanceBefore); 
     }
 
     function testRedeem() public {
@@ -200,11 +198,15 @@ contract LPAndChillTest is Test {
         // Redeem just half of the amount, so the fee mechasim won't bother this test
         uint256 redeemShares = initialShares / 2; 
 
+        // Give it some time and let the yield grow
+        skip(60*60*24*100);
+
         uint256 userChillSharesBefore = chill.balanceOf(address(this));
         uint256 chillTotalAssetsBefore = chill.totalAssets();
 
         // Redeem shares
         chill.approve(address(chill), type(uint256).max);
+        asset.approve(address(chill), type(uint256).max);
         uint256 assets = chill.redeem(redeemShares, address(this), address(this));
 
         uint256 chillTotalAssetsAfter = chill.totalAssets();
@@ -244,26 +246,21 @@ contract LPAndChillTest is Test {
         vm.prank(operator); 
         chill.setServiceFeeBps(1000); 
 
-        // let someone make a deposit so there will be fees incurred
-        uint256 depositAmount = 1000 * 10 ** asset.decimals(); 
-        deal(address(asset), address(this), depositAmount); 
-        asset.approve(address(chill), depositAmount);
 
-        
-        chill.deposit(depositAmount, address(this));
+        asset.approve(address(chill), type(uint256).max);
+        testWithdraw();
 
-        // calculate fee
-        uint256 expectedFee = (depositAmount * uint256(chill.serviceFeeBps())) / uint256(chill.MAX_BPS());
+        uint256 feeBalance = asset.balanceOf(address(chill.feeVault()));
 
         // withdraw the fees as operator
         uint256 balanceBefore = asset.balanceOf(address(operator));
         vm.startPrank(operator); 
-        IVault(chill.feeVault()).withdrawERC20(address(asset), expectedFee, address(operator));
+        IVault(chill.feeVault()).withdrawERC20(address(asset), feeBalance, address(operator));
         vm.stopPrank();
         uint256 balanceAfter = asset.balanceOf(address(operator));
 
         // verify the balance change
-        assert(balanceAfter - balanceBefore == expectedFee);
+        assert(balanceAfter == balanceBefore + feeBalance);
     }
 
     function testWithdrawFeeAsNonOperator() public {
@@ -271,22 +268,22 @@ contract LPAndChillTest is Test {
         vm.prank(operator); 
         chill.setServiceFeeBps(1000); 
 
-        // let someone make a deposit so there will be fees incurred
-        uint256 depositAmount = 1000 * 10 ** asset.decimals(); 
-        deal(address(asset), address(this), depositAmount); 
-        asset.approve(address(chill), depositAmount);
 
-        
-        chill.deposit(depositAmount, address(this));
+        asset.approve(address(chill), type(uint256).max);
 
-        // calculate fee
-        uint256 expectedFee = (depositAmount * uint256(chill.serviceFeeBps())) / uint256(chill.MAX_BPS());
-        IVault feeVault = chill.feeVault();
+        uint256 feeBalanceBefore = asset.balanceOf(address(chill.feeVault()));
+        testWithdraw();
+
+        uint256 feeBalanceAfter = asset.balanceOf(address(chill.feeVault()));
+
+        assert(feeBalanceBefore == 0);
+        assert(feeBalanceAfter > feeBalanceBefore);
         
         // when a non-operator tries to withdraw the fee
         address nonOperator = address(0x111); 
+        IVault feeVault = IVault(chill.feeVault());
         vm.prank(nonOperator); 
         vm.expectRevert("feeVault: invalid role for the caller"); 
-        feeVault.withdrawERC20(address(asset), expectedFee, address(nonOperator));
+        feeVault.withdrawERC20(address(asset), feeBalanceAfter, address(nonOperator));
     }
 }
